@@ -1,6 +1,9 @@
 import os
 import re
 import sys
+from rapidfuzz import process, fuzz  # Import rapidfuzz for fuzzy matching
+
+from colorama import Fore, init, Style
 
 
 class _Getch:
@@ -12,8 +15,6 @@ screen."""
             self.impl = _GetchWindows()
         except ImportError:
             try:
-                self.impl = _GetchMacCarbon()
-            except ImportError:
                 self.impl = _GetchUnix()
             except AttributeError:
                 self.impl = _GetchUnix()
@@ -48,108 +49,154 @@ class _GetchWindows:
         return msvcrt.getch()
 
 
-class _GetchMacCarbon:
-    """
-    A function which returns the current ASCII key that is down;
-    if no ASCII key is down, the null string is returned.  The
-    page http://www.mactech.com/macintosh-c/chap02-1.html was
-    very helpful in figuring out how to do this.
-    """
-
-    def __init__(self):
-        import Carbon
-        Carbon.Evt  # see if it has this (in Unix, it doesn't)
-
-    def __call__(self):
-        import Carbon
-        if Carbon.Evt.EventAvail(0x0008)[0] == 0:  # 0x0008 is the keyDownMask
-            return ''
-        else:
-            #
-            # The event contains the following info:
-            # (what,msg,when,where,mod)=Carbon.Evt.GetNextEvent(0x0008)[1]
-            #
-            # The message (msg) contains the ASCII char which is
-            # extracted with the 0x000000FF charCodeMask; this
-            # number is converted to an ASCII character with chr() and
-            # returned
-            #
-            (what, msg, when, where, mod) = Carbon.Evt.GetNextEvent(0x0008)[1]
-            return chr(msg & 0x000000FF)
-
-
 getch = _Getch()
 
 
-def menu(menutitle, options, printhelp=True):
+def menu(menutitle, options, printhelp=True, autoselect=False, fuzzy=False):
     """
-    generate a terminal fuzzy menu
+    Generate a terminal fuzzy menu with regex-based searching, fuzzy searching, and autoselect.
 
     @param string       menutitle
     @param list strings options
     @param boolean      printhelp (default=True)
+    @param boolean      autoselect (default=False)
+    @param boolean      fuzzy (default=False, press [TAB] to swith between regex and fuzzy search)
 
     @return string      selected option by user
     """
 
-    pat = re.compile(r"[A-Za-z0-9]+|:|\.|-|_|/|\\|\[|\]|~")
-
+    init()
     keyboardinput = ""
-    selected = -1
+    selected = 0  # Start with the first option selected
     while True:
-
-        # clear terminal
+        # Clear terminal
         os.system('cls' if os.name == 'nt' else 'clear')
 
-        # generate current selection menu filtered with user input
+        # Generate current selection menu filtered with user input
         current = [content.replace("\n", "") for content in options]
-        for filter in keyboardinput.split():
-            current = [content.replace(
-                "\n", "") for content in current if filter.lower() in content.lower()]
-        if keyboardinput == "":
-            current.append("")
+        matches = []
 
-        # print in menu the current selected entry
-        selected *= (selected < len(current))
-        if len(current) != 0:
-            current[selected] = " >> " + current[selected]
+        if keyboardinput.strip():
+            if fuzzy:
+                # Use fuzzy matching to filter options
+                matches = process.extract(
+                    keyboardinput, current, scorer=fuzz.partial_ratio, limit=10
+                )
+                # Keep only matches with a score above a threshold (e.g., 60)
+                current = [match[0] for match in matches if match[1] > 60]
+            else:
+                # Use regex to filter options if the input is a valid regex
+                try:
+                    regex = re.compile(keyboardinput, re.IGNORECASE)
+                    current = [content for content in current if regex.search(content)]
+                except re.error:
+                    # If the regex is invalid, show all options
+                    pass
 
-        # print menu
-        print("\n".join(current))
+        # Autoselect if only one option is left
+        if autoselect and len(current) == 1:
+            print(f"Automatically selected: {current[0]}")
+            return current[0]
 
-        # print write section
+        # Ensure the selected index is within bounds
+        selected = max(0, min(selected, len(current) - 1))
+
+        # Print the menu with the current selected entry highlighted
+        for i, item in enumerate(current):
+            if fuzzy:
+                # Highlight the matched part for fuzzy search
+                match = next((m for m in matches if m[0] == item), None)
+                if match:
+                    start = item.lower().find(keyboardinput.lower())
+                    if start != -1:
+                        end = start + len(keyboardinput)
+                        highlighted = (
+                            item[:start]
+                            + Fore.YELLOW
+                            + item[start:end]
+                            + Style.RESET_ALL
+                            + item[end:]
+                        )
+                    else:
+                        highlighted = item
+                else:
+                    highlighted = item
+            else:
+                # Highlight the matched part for regex search
+                try:
+                    regex = re.compile(keyboardinput, re.IGNORECASE)
+                    highlighted = regex.sub(
+                        lambda m: f"{Fore.YELLOW}{m.group(0)}{Style.RESET_ALL}", item
+                    )
+                except re.error:
+                    highlighted = item
+
+            if i == selected:
+                print(f" {Fore.RED}>>{Style.RESET_ALL} {highlighted}")  # Highlight the selected item
+            else:
+                print(f"    {highlighted}")
+
+        # Print the write section
         if printhelp:
             print(
-                "Default hotkeys: [enter] select, [tab] select between current selection, [esc] clean, [Ctrl+c] exit\n")
+                "Default hotkeys: [enter] select, [up/down arrows] navigate, [esc] clean, [Ctrl+c] exit\n"
+                "You can also type a valid regex or fuzzy input to filter the options.\n"
+            )
         print(menutitle + "~$ " + keyboardinput + "|")
+        print(f"Fuzzy search: {fuzzy}")
 
+        # Read user input
         stdin = getch()
-        if b"\xe0" == stdin:  # skip escape sequences
-            continue
         if sys.platform == "win32":
             stdin = stdin.decode("utf-8", "replace")
 
-        # validate input
-        if "\r" == stdin:  # enter
+        # Handle multi-character escape sequences for arrow keys
+        if stdin == "\x1b":  # Escape sequence
+            next_char = getch()
+            if next_char == "[":
+                arrow_key = getch()
+                if arrow_key == "A":  # Up arrow
+                    selected -= 1
+                elif arrow_key == "B":  # Down arrow
+                    selected += 1
+            continue
+
+        # Validate input
+        if stdin == "\r":  # Enter
             if len(current) > 0:
-                if keyboardinput != current[selected].replace(" >> ", ""):
-                    keyboardinput = current[selected].replace(
-                        " >> ", "").replace("[args]", "")
-                else:
-                    return keyboardinput
-            else:
-                return keyboardinput
-        if "\x1b" == stdin:  # esc
+                return current[selected]
+        elif stdin == "\x1b":  # Esc
             keyboardinput = ""
-            selected = -1
-        if "\t" == stdin:  # tab
-            selected += 1
-        if "\x7f" == stdin or "\x08" == stdin:  # backspace
+            selected = 0
+        elif stdin == "\x7f" or stdin == "\x08":  # Backspace
             keyboardinput = keyboardinput[:-1]
-        if "\x20" == stdin:  # space
+        elif stdin == "\x20":  # Space
             keyboardinput += " "
-        if "\x03" == stdin:  # C-c
+        elif stdin == "\x03":  # Ctrl+C
             quit()
-        if re.fullmatch(pat, stdin):
+        elif stdin == "\t":  # Tab
+            fuzzy = not fuzzy
+        elif re.fullmatch(r"[^\x00-\x1F\x7F]", stdin):  # Match printable characters
             keyboardinput += stdin
-            selected = -1
+            selected = 0
+
+
+# Define the menu title and options
+menu_title = "Main Menu"
+menu_options = [
+    "add item",
+    "remove item",
+    "clear all",
+    "exit",
+    "test 1",
+    "volba zde",
+    "test 5",
+    "test 6",
+    "test 7",
+]
+
+# Call the menu function
+selected_option = menu(menu_title, menu_options, autoselect=False, fuzzy=False)
+
+# Print the selected option
+print(f"Selected option: {selected_option}")
