@@ -11,13 +11,10 @@ class _Getch:
 screen."""
 
     def __init__(self):
-        try:
+        if os.name == 'nt':  # Windows
             self.impl = _GetchWindows()
-        except ImportError:
-            try:
-                self.impl = _GetchUnix()
-            except AttributeError:
-                self.impl = _GetchUnix()
+        else:  # Unix-like systems
+            self.impl = _GetchUnix()
 
     def __call__(self):
         return self.impl()
