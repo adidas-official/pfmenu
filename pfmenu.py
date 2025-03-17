@@ -1,13 +1,25 @@
 import os
 import re
 import sys
-from rapidfuzz import process, fuzz  # Import rapidfuzz for fuzzy matching
-from colorama import Fore, init, Style
+
+# Try to import colorama for colored output
+try:
+    from colorama import Fore, init, Style
+    COLORAMA_AVAILABLE = True
+    init()  # Initialize colorama
+except ImportError:
+    COLORAMA_AVAILABLE = False
+
+# Try to import rapidfuzz for fuzzy matching
+try:
+    from rapidfuzz import process, fuzz
+    FUZZY_AVAILABLE = True
+except ImportError:
+    FUZZY_AVAILABLE = False
 
 
 class _Getch:
-    """Gets a single character from standard input.  Does not echo to the
-screen."""
+    """Gets a single character from standard input. Does not echo to the screen."""
 
     def __init__(self):
         if os.name == 'nt':  # Windows
@@ -20,9 +32,6 @@ screen."""
 
 
 class _GetchUnix:
-    def __init__(self):
-        self = self
-
     def __call__(self):
         import tty
         import termios
@@ -37,15 +46,9 @@ class _GetchUnix:
 
 
 class _GetchWindows:
-    def __init__(self):
-        import msvcrt
-
     def __call__(self):
         import msvcrt
         return msvcrt.getch()
-
-
-getch = _Getch()
 
 
 class Menu:
@@ -59,16 +62,16 @@ class Menu:
         @param boolean      autoselect: Automatically select if one option is left (default=False)
         @param boolean      fuzzy: Enable fuzzy search (default=False)
         """
-        init()  # Initialize colorama
         self.title = title
         self.options = options
         self.printhelp = printhelp
         self.autoselect = autoselect
-        self.fuzzy = fuzzy
+        self.fuzzy = fuzzy and FUZZY_AVAILABLE  # Enable fuzzy only if rapidfuzz is available
         self.keyboardinput = ""
         self.selected = 0  # Start with the first option selected
         self.current = options  # Filtered options
         self.matches = []  # Fuzzy matches
+        self.getch = _Getch()
 
     def clear_terminal(self):
         """Clear the terminal screen."""
@@ -77,6 +80,7 @@ class Menu:
     def filter_options(self):
         """Filter options based on user input."""
         self.current = [content.replace("\n", "") for content in self.options]
+
         if self.keyboardinput.strip():
             if self.fuzzy:
                 # Use fuzzy matching to filter options
@@ -96,6 +100,9 @@ class Menu:
 
     def highlight_match(self, item):
         """Highlight the matched part of the item."""
+        if not COLORAMA_AVAILABLE:
+            return item  # Skip highlighting if colorama is not available
+
         if self.fuzzy:
             match = next((m for m in self.matches if m[0] == item), None)
             if match:
@@ -136,7 +143,10 @@ class Menu:
         for i, item in enumerate(self.current):
             highlighted = self.highlight_match(item)
             if i == self.selected:
-                print(f" {Fore.RED}>>{Style.RESET_ALL} {highlighted}")  # Highlight the selected item
+                if COLORAMA_AVAILABLE:
+                    print(f" {Fore.RED}>>{Style.RESET_ALL} {highlighted}")  # Highlight the selected item
+                else:
+                    print(f" >> {highlighted}")
             else:
                 print(f"    {highlighted}")
 
@@ -151,15 +161,15 @@ class Menu:
 
     def handle_input(self):
         """Handle user input."""
-        stdin = getch()
+        stdin = self.getch()
         if sys.platform == "win32":
             stdin = stdin.decode("utf-8", "replace")
 
         # Handle multi-character escape sequences for arrow keys
         if stdin == "\x1b":  # Escape sequence
-            next_char = getch()
+            next_char = self.getch()
             if next_char == "[":
-                arrow_key = getch()
+                arrow_key = self.getch()
                 if arrow_key == "A":  # Up arrow
                     self.selected -= 1
                 elif arrow_key == "B":  # Down arrow
@@ -180,7 +190,8 @@ class Menu:
         elif stdin == "\x03":  # Ctrl+C
             quit()
         elif stdin == "\t":  # Tab
-            self.fuzzy = not self.fuzzy
+            if FUZZY_AVAILABLE:
+                self.fuzzy = not self.fuzzy
         elif re.fullmatch(r"[^\x00-\x1F\x7F]", stdin):  # Match printable characters
             self.keyboardinput += stdin
             self.selected = 0
